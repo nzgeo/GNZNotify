@@ -19,6 +19,8 @@
 //   CacheSize    REG_DWORD   default 300   – max alerts kept in memory
 //   WebhookPort  REG_DWORD   default 8080  – Jira webhook listener port
 //   ApiPort      REG_DWORD   default 8081  – client-facing API port
+//   JiraPath     REG_SZ      default ""    – Jira base URL, e.g. http://jira.example.com
+//                                            Used to build /browse/<key> links in alerts.
 //
 // Webhook endpoint (WebhookPort):
 //   POST /webhook   – Jira sends here; body is JSON
@@ -81,12 +83,14 @@ struct Alert {
     std::string priority;
     std::string reporter;
     std::string status;
+    std::string link;      // full Jira browse URL, e.g. http://jira/browse/PROJ-1
 };
 
 struct ServerConfig {
-    DWORD cache_size = DEF_CACHE_SIZE;
-    DWORD webhook_port = DEF_WEBHOOK_PORT;
-    DWORD api_port = DEF_API_PORT;
+    DWORD       cache_size = DEF_CACHE_SIZE;
+    DWORD       webhook_port = DEF_WEBHOOK_PORT;
+    DWORD       api_port = DEF_API_PORT;
+    std::string jira_path;   // e.g. "http://jira.example.com"  (no trailing slash)
 };
 
 static ServerConfig g_cfg;
@@ -107,6 +111,20 @@ static void RegWriteDword(HKEY hKey, const wchar_t* name, DWORD val) {
         reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
 }
 
+// Reads a REG_SZ value and returns it as a UTF-8 std::string.
+static std::string RegReadString(HKEY hKey, const wchar_t* name) {
+    wchar_t buf[1024] = {};
+    DWORD sz = sizeof(buf), type = REG_SZ;
+    if (RegQueryValueExW(hKey, name, nullptr, &type,
+        reinterpret_cast<LPBYTE>(buf), &sz) != ERROR_SUCCESS)
+        return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string result(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, buf, -1, &result[0], n, nullptr, nullptr);
+    return result;
+}
+
 static void LoadConfig() {
     HKEY hKey = nullptr;
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, REG_PATH, 0, nullptr,
@@ -115,6 +133,10 @@ static void LoadConfig() {
         g_cfg.cache_size = RegReadDword(hKey, L"CacheSize", DEF_CACHE_SIZE);
         g_cfg.webhook_port = RegReadDword(hKey, L"WebhookPort", DEF_WEBHOOK_PORT);
         g_cfg.api_port = RegReadDword(hKey, L"ApiPort", DEF_API_PORT);
+        g_cfg.jira_path = RegReadString(hKey, L"JiraPath");
+        // Strip trailing slash so we can always append /browse/KEY safely
+        while (!g_cfg.jira_path.empty() && g_cfg.jira_path.back() == '/')
+            g_cfg.jira_path.pop_back();
         RegCloseKey(hKey);
     }
 }
@@ -137,6 +159,9 @@ static void WriteDefaultsIfMissing() {
     writeIfAbsent(L"CacheSize", DEF_CACHE_SIZE);
     writeIfAbsent(L"WebhookPort", DEF_WEBHOOK_PORT);
     writeIfAbsent(L"ApiPort", DEF_API_PORT);
+    // JiraPath is optional — not written here.
+    // If absent, the server auto-detects the Jira base URL from the webhook payload.
+    // Set it manually: HKLM\SOFTWARE\GNZ\NotificationService\JiraPath (REG_SZ).
     RegCloseKey(hKey);
 }
 
@@ -277,7 +302,8 @@ static std::string AlertToJson(const Alert& a) {
         << "\"project\":\"" << JsonEsc(a.project) << "\","
         << "\"priority\":\"" << JsonEsc(a.priority) << "\","
         << "\"reporter\":\"" << JsonEsc(a.reporter) << "\","
-        << "\"status\":\"" << JsonEsc(a.status) << "\""
+        << "\"status\":\"" << JsonEsc(a.status) << "\","
+        << "\"link\":\"" << JsonEsc(a.link) << "\""
         << '}';
     return ss.str();
 }
@@ -306,45 +332,66 @@ static std::string LocalTimestamp() {
 // Jira webhook parsing
 // ---------------------------------------------------------------------------
 //
-// Jira webhooks send a JSON body with a "webhookEvent" field and an "issue"
-// object. We extract the fields we care about without a full JSON parser.
+// Standard Jira webhook structure (Server, Data Center, and Cloud):
+//
+//   {
+//     "webhookEvent": "jira:issue_updated",
+//     "user":  { "key": "JIRAUSER10071", ... },   ← user who triggered it
+//     "issue": {
+//       "key": "PROJ-123",                         ← the issue key we want
+//       "fields": {
+//         "summary":  "...",
+//         "priority": { "name": "High" },
+//         "status":   { "name": "In Progress" },
+//         "reporter": { "displayName": "Jane Smith" },
+//         "project":  { "key": "PROJ", ... }
+//       }
+//     }
+//   }
+//
+// All parsing is scoped to the "issue" object (and "fields" sub-object) to
+// avoid false matches on identically-named keys in "user" or other objects.
 
 static Alert ParseJiraBody(const std::string& body) {
     Alert a;
     a.timestamp = LocalTimestamp();
     a.event = JsonGet(body, "webhookEvent");
 
-    // Top-level fields (some Jira server versions flatten them)
-    a.issue_key = JsonGet(body, "key");
-    a.summary = JsonGet(body, "summary");
-    a.project = JsonGet(body, "projectKey");
-
-    // "issue": { "key": ..., "fields": { "summary": ..., ... } }
+    // Locate the opening brace of the "issue" object.
     size_t ip = body.find("\"issue\"");
     if (ip != std::string::npos) {
-        std::string isub = body.substr(ip);
-        if (a.issue_key.empty()) a.issue_key = JsonGet(isub, "key");
-        size_t fp = isub.find("\"fields\"");
-        if (fp != std::string::npos) {
-            std::string fsub = isub.substr(fp);
-            if (a.summary.empty()) a.summary = JsonGet(fsub, "summary");
+        size_t brace = body.find('{', ip + 7);   // skip past "issue":
+        if (brace != std::string::npos) {
+            std::string issue = body.substr(brace);
+
+            // "key" is a direct field of the issue object (e.g. "PROJ-123").
+            a.issue_key = JsonGet(issue, "key");
+
+            // Everything else lives inside issue.fields.
+            size_t fp = issue.find("\"fields\"");
+            if (fp != std::string::npos) {
+                std::string fields = issue.substr(fp);
+
+                a.summary = JsonGet(fields, "summary");
+
+                size_t pp = fields.find("\"priority\"");
+                if (pp != std::string::npos)
+                    a.priority = JsonGet(fields.substr(pp), "name");
+
+                size_t sp = fields.find("\"status\"");
+                if (sp != std::string::npos)
+                    a.status = JsonGet(fields.substr(sp), "name");
+
+                size_t rp = fields.find("\"reporter\"");
+                if (rp != std::string::npos)
+                    a.reporter = JsonGet(fields.substr(rp), "displayName");
+
+                size_t projp = fields.find("\"project\"");
+                if (projp != std::string::npos)
+                    a.project = JsonGet(fields.substr(projp), "key");
+            }
         }
     }
-
-    // "priority": { "name": "High" }
-    size_t pp = body.find("\"priority\"");
-    if (pp != std::string::npos)
-        a.priority = JsonGet(body.substr(pp), "name");
-
-    // "status": { "name": "Open" }
-    size_t sp = body.find("\"status\"");
-    if (sp != std::string::npos)
-        a.status = JsonGet(body.substr(sp), "name");
-
-    // reporter displayName
-    size_t rp = body.find("\"reporter\"");
-    if (rp != std::string::npos)
-        a.reporter = JsonGet(body.substr(rp), "displayName");
 
     if (a.event.empty())   a.event = "jira:webhook";
     if (a.summary.empty()) a.summary = "(no summary)";
@@ -497,6 +544,7 @@ void HttpServer::AcceptLoop() {
         if (r > 0 && FD_ISSET(m_sock, &fds)) {
             SOCKET client = accept(m_sock, nullptr, nullptr);
             if (client != INVALID_SOCKET) {
+                printf("[http] connection accepted on port\n");
                 auto* ctx = new ClientCtx{ this, client };
                 HANDLE t = CreateThread(nullptr, 0, ClientProc, ctx, 0, nullptr);
                 if (t) CloseHandle(t);   // fire-and-forget
@@ -679,6 +727,21 @@ void HttpServer::HandleClient(SOCKET sock) {
     closesocket(sock);
 }
 
+// Reads JiraPath directly from the registry on every call so changes take
+// effect without restarting the service.  Falls back to g_cfg.jira_path
+// (loaded at startup) if the registry cannot be opened.
+static std::string ReadJiraPath() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, REG_PATH, 0,
+        KEY_READ, &hKey) == ERROR_SUCCESS) {
+        std::string path = RegReadString(hKey, L"JiraPath");
+        RegCloseKey(hKey);
+        while (!path.empty() && path.back() == '/') path.pop_back();
+        return path;
+    }
+    return g_cfg.jira_path;  // fallback to startup value
+}
+
 // ---------------------------------------------------------------------------
 // HTTP servers
 // ---------------------------------------------------------------------------
@@ -686,10 +749,52 @@ void HttpServer::HandleClient(SOCKET sock) {
 static HttpServer* g_wh = nullptr;   // webhook receiver
 static HttpServer* g_api = nullptr;   // client API
 
+// Derives the Jira base URL from the "self" field present in every Jira
+// webhook payload, e.g. "https://jira.example.com/rest/api/2/issue/10000"
+// → "https://jira.example.com".  Returns empty string if not found.
+static std::string ExtractJiraBaseUrl(const std::string& body) {
+    // "self" appears in multiple nested objects; look for the one inside "issue".
+    size_t ip = body.find("\"issue\"");
+    const std::string& src = (ip != std::string::npos) ? body.substr(ip) : body;
+
+    std::string self = JsonGet(src, "self");
+    if (self.empty()) return {};
+
+    // Strip the /rest/... path to get just scheme + host (+ optional port).
+    size_t restPos = self.find("/rest/");
+    if (restPos != std::string::npos)
+        return self.substr(0, restPos);
+
+    // Fallback: strip everything after the third slash (scheme://host/...).
+    size_t schemeEnd = self.find("://");
+    if (schemeEnd == std::string::npos) return {};
+    size_t pathStart = self.find('/', schemeEnd + 3);
+    return (pathStart != std::string::npos) ? self.substr(0, pathStart) : self;
+}
+
 static void SetupWebhookServer(HttpServer& s) {
     s.Post("/webhook", [](const HttpRequest& req, HttpResponse& res) {
+        printf("[webhook] POST /webhook  body_len=%zu\n", req.body.size());
         Alert a = ParseJiraBody(req.body);
+
+        // Build the browse link.
+        // Priority: configured JiraPath (re-read live) → auto-detected from "self".
+        if (!a.issue_key.empty()) {
+            std::string jiraPath = ReadJiraPath();
+            std::string base = jiraPath.empty()
+                ? ExtractJiraBaseUrl(req.body)
+                : jiraPath;
+            if (!base.empty())
+                a.link = base + "/browse/" + a.issue_key;
+        }
+
+        // Capture fields before moving into the store
+        std::string ev = a.event;
+        std::string key = a.issue_key;
+        std::string link = a.link;
         int id = g_store.Push(std::move(a));
+        printf("[webhook] stored alert id=%d  event=%s  key=%s  link=%s\n",
+            id, ev.c_str(), key.c_str(), link.c_str());
         res.set_content(
             "{\"received\":true,\"id\":" + std::to_string(id) + "}",
             "application/json");
