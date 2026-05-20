@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // gnz_notification_agent.cpp
 // GNZ Notification Agent  —  system-tray application
 // =============================================================================
@@ -85,8 +85,8 @@
 #define WC_BANNER  L"GNZ_Banner"
 
 static constexpr wchar_t REG_PATH[] = L"SOFTWARE\\GNZ\\NotificationAgent";
-static constexpr int BANNER_TIMER = 1;
-static constexpr DWORD BANNER_MS = 7000;   // auto-close delay
+static constexpr int BANNER_TIMER   = 1;
+static constexpr DWORD BANNER_MS    = 7000;   // auto-close delay
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -107,13 +107,13 @@ struct Alert {
 };
 
 struct AgentConfig {
-    std::wstring server = L"localhost";
-    int          port = 8081;
-    int          interval = 5000;
-    bool         banner = true;
-    bool         sound = true;
-    bool         icon_chg = false;
-    bool         active = true;
+    std::wstring server        = L"localhost";
+    int          port          = 8081;
+    int          interval      = 5000;
+    bool         banner        = true;
+    bool         sound         = true;
+    bool         icon_chg      = false;
+    bool         active        = true;
     bool         addressed_only = true;   // notify only when assignee == current user
 };
 
@@ -127,23 +127,23 @@ struct PendingUpdate {
 // Global state
 // ---------------------------------------------------------------------------
 
-static HINSTANCE g_hInst = nullptr;
-static HWND      g_hwndMain = nullptr;   // hidden host window
-static HWND      g_hwndAlerts = nullptr;   // alerts list window (nullptr if closed)
-static HWND      g_hwndConfig = nullptr;   // config window     (nullptr if closed)
-static HWND      g_hwndBanner = nullptr;   // current banner    (nullptr if none)
+static HINSTANCE g_hInst       = nullptr;
+static HWND      g_hwndMain    = nullptr;   // hidden host window
+static HWND      g_hwndAlerts  = nullptr;   // alerts list window (nullptr if closed)
+static HWND      g_hwndConfig  = nullptr;   // config window     (nullptr if closed)
+static HWND      g_hwndBanner  = nullptr;   // current banner    (nullptr if none)
 
 static HICON g_iconNormal = nullptr;        // default tray icon
-static HICON g_iconAlert = nullptr;        // alert-pending tray icon
-static bool  g_hasAlert = false;          // true while unacknowledged alerts exist
+static HICON g_iconAlert  = nullptr;        // alert-pending tray icon
+static bool  g_hasAlert   = false;          // true while unacknowledged alerts exist
 
 static AgentConfig g_cfg;
 static std::vector<Alert> g_alerts;         // local alert cache (main thread only)
 static std::wstring g_windowsUser;          // current logged-on username (for addressed-only filter)
 
 // Poll thread
-static std::atomic<bool> g_pollActive{ false };
-static HANDLE            g_pollWake = nullptr;   // auto-reset, signals stop/wake
+static std::atomic<bool> g_pollActive{false};
+static HANDLE            g_pollWake   = nullptr;   // auto-reset, signals stop/wake
 static HANDLE            g_pollThread = nullptr;
 
 // Pending update queue (poll thread writes, main thread drains)
@@ -162,10 +162,10 @@ static std::wstring g_bannerLink;    // Jira browse URL — opened on click (emp
 static std::string WideToUtf8(const std::wstring& w) {
     if (w.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1,
-        nullptr, 0, nullptr, nullptr);
+                                nullptr, 0, nullptr, nullptr);
     std::string s(static_cast<size_t>(n - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1,
-        &s[0], n, nullptr, nullptr);
+                        &s[0], n, nullptr, nullptr);
     return s;
 }
 
@@ -182,7 +182,7 @@ static std::wstring Utf8ToWide(const std::string& u) {
 // ---------------------------------------------------------------------------
 
 struct HttpResult {
-    bool        ok = false;
+    bool        ok     = false;
     int         status = 0;
     std::string body;
 };
@@ -191,8 +191,8 @@ struct HttpResult {
 // verb is "GET" or "DELETE". path is the request-target (e.g. "/api/alerts").
 // Timeouts: connect 3 s, receive 5 s.
 static HttpResult DoHttpRequest(const std::string& host, int port,
-    const std::string& verb,
-    const std::string& path) {
+                                 const std::string& verb,
+                                 const std::string& path) {
     HttpResult result;
 
     std::wstring whost = Utf8ToWide(host);
@@ -209,9 +209,9 @@ static HttpResult DoHttpRequest(const std::string& host, int port,
 
     DWORD connectTimeout = 3000, receiveTimeout = 5000;
     WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT,
-        &connectTimeout, sizeof(connectTimeout));
+                     &connectTimeout, sizeof(connectTimeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT,
-        &receiveTimeout, sizeof(receiveTimeout));
+                     &receiveTimeout, sizeof(receiveTimeout));
 
     HINTERNET hConnect = WinHttpConnect(
         hSession, whost.c_str(),
@@ -232,8 +232,8 @@ static HttpResult DoHttpRequest(const std::string& host, int port,
     }
 
     if (WinHttpSendRequest(hRequest,
-        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-        WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                            WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
         WinHttpReceiveResponse(hRequest, nullptr)) {
         // Read HTTP status code
         DWORD statusCode = 0, statusSize = sizeof(statusCode);
@@ -247,11 +247,11 @@ static HttpResult DoHttpRequest(const std::string& host, int port,
         // Read response body
         DWORD bytesAvail = 0;
         while (WinHttpQueryDataAvailable(hRequest, &bytesAvail) &&
-            bytesAvail > 0) {
+               bytesAvail > 0) {
             std::vector<char> buf(bytesAvail + 1);
             DWORD bytesRead = 0;
             if (WinHttpReadData(hRequest, buf.data(),
-                bytesAvail, &bytesRead) && bytesRead > 0)
+                                bytesAvail, &bytesRead) && bytesRead > 0)
                 result.body.append(buf.data(), bytesRead);
         }
         result.ok = true;
@@ -312,9 +312,9 @@ static std::vector<Alert> ParseAlertsResponse(const std::string& json) {
     if (bracket == std::string::npos) return result;
 
     // Walk the array: extract top-level objects {…}
-    int    depth = 0;
+    int    depth    = 0;
     size_t objStart = std::string::npos;
-    bool   inStr = false;
+    bool   inStr    = false;
 
     for (size_t i = bracket + 1; i < json.size(); ++i) {
         char ch = json[i];
@@ -325,28 +325,26 @@ static std::vector<Alert> ParseAlertsResponse(const std::string& json) {
         if (ch == '{') {
             if (depth == 0) objStart = i;
             ++depth;
-        }
-        else if (ch == '}') {
+        } else if (ch == '}') {
             --depth;
             if (depth == 0 && objStart != std::string::npos) {
                 std::string obj = json.substr(objStart, i - objStart + 1);
                 Alert a;
-                a.id = JsonGetInt(obj, "id");
+                a.id        = JsonGetInt(obj, "id");
                 a.timestamp = JsonGet(obj, "timestamp");
-                a.event = JsonGet(obj, "event");
+                a.event     = JsonGet(obj, "event");
                 a.issue_key = JsonGet(obj, "issue_key");
-                a.summary = JsonGet(obj, "summary");
-                a.project = JsonGet(obj, "project");
-                a.priority = JsonGet(obj, "priority");
-                a.reporter = JsonGet(obj, "reporter");
-                a.status = JsonGet(obj, "status");
-                a.link = JsonGet(obj, "link");
-                a.user = JsonGet(obj, "user");
+                a.summary   = JsonGet(obj, "summary");
+                a.project   = JsonGet(obj, "project");
+                a.priority  = JsonGet(obj, "priority");
+                a.reporter  = JsonGet(obj, "reporter");
+                a.status    = JsonGet(obj, "status");
+                a.link      = JsonGet(obj, "link");
+                a.user      = JsonGet(obj, "user");
                 if (a.id > 0) result.push_back(std::move(a));
                 objStart = std::string::npos;
             }
-        }
-        else if (ch == ']' && depth == 0) {
+        } else if (ch == ']' && depth == 0) {
             break;
         }
     }
@@ -360,30 +358,30 @@ static std::vector<Alert> ParseAlertsResponse(const std::string& json) {
 static void LoadConfig() {
     HKEY hKey = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, nullptr,
-        REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE,
-        nullptr, &hKey, nullptr) != ERROR_SUCCESS)
+                        REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE,
+                        nullptr, &hKey, nullptr) != ERROR_SUCCESS)
         return;
 
     auto readDword = [&](const wchar_t* name, DWORD def) -> DWORD {
         DWORD v = def, sz = sizeof(v), type = REG_DWORD;
         RegQueryValueExW(hKey, name, nullptr, &type,
-            reinterpret_cast<LPBYTE>(&v), &sz);
+                         reinterpret_cast<LPBYTE>(&v), &sz);
         return v;
-        };
+    };
 
     wchar_t buf[256] = {};
     DWORD sz = sizeof(buf), type = REG_SZ;
     if (RegQueryValueExW(hKey, L"ServerAddress", nullptr, &type,
-        reinterpret_cast<LPBYTE>(buf), &sz) == ERROR_SUCCESS)
+                         reinterpret_cast<LPBYTE>(buf), &sz) == ERROR_SUCCESS)
         g_cfg.server = buf;
 
-    g_cfg.port = static_cast<int>(readDword(L"ApiPort", 8081));
+    g_cfg.port     = static_cast<int>(readDword(L"ApiPort",      8081));
     g_cfg.interval = static_cast<int>(readDword(L"PollInterval", 5000));
-    g_cfg.banner = readDword(L"ShowBanner", 1) != 0;
-    g_cfg.sound = readDword(L"EmitSound", 1) != 0;
-    g_cfg.icon_chg = readDword(L"ChangeIcon", 0) != 0;
-    g_cfg.active = readDword(L"Active", 1) != 0;
-    g_cfg.addressed_only = readDword(L"AddressedOnly", 1) != 0;
+    g_cfg.banner          = readDword(L"ShowBanner",    1) != 0;
+    g_cfg.sound           = readDword(L"EmitSound",     1) != 0;
+    g_cfg.icon_chg        = readDword(L"ChangeIcon",    0) != 0;
+    g_cfg.active          = readDword(L"Active",        1) != 0;
+    g_cfg.addressed_only  = readDword(L"AddressedOnly", 1) != 0;
 
     RegCloseKey(hKey);
 }
@@ -391,24 +389,24 @@ static void LoadConfig() {
 static void SaveConfig() {
     HKEY hKey = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, nullptr,
-        REG_OPTION_NON_VOLATILE, KEY_WRITE,
-        nullptr, &hKey, nullptr) != ERROR_SUCCESS)
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE,
+                        nullptr, &hKey, nullptr) != ERROR_SUCCESS)
         return;
 
     RegSetValueExW(hKey, L"ServerAddress", 0, REG_SZ,
-        reinterpret_cast<const BYTE*>(g_cfg.server.c_str()),
-        static_cast<DWORD>((g_cfg.server.size() + 1) * sizeof(wchar_t)));
+                   reinterpret_cast<const BYTE*>(g_cfg.server.c_str()),
+                   static_cast<DWORD>((g_cfg.server.size() + 1) * sizeof(wchar_t)));
 
     auto writeDword = [&](const wchar_t* name, DWORD val) {
         RegSetValueExW(hKey, name, 0, REG_DWORD,
-            reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
-        };
-    writeDword(L"ApiPort", static_cast<DWORD>(g_cfg.port));
+                       reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
+    };
+    writeDword(L"ApiPort",      static_cast<DWORD>(g_cfg.port));
     writeDword(L"PollInterval", static_cast<DWORD>(g_cfg.interval));
-    writeDword(L"ShowBanner", g_cfg.banner ? 1 : 0);
-    writeDword(L"EmitSound", g_cfg.sound ? 1 : 0);
-    writeDword(L"ChangeIcon", g_cfg.icon_chg ? 1 : 0);
-    writeDword(L"Active", g_cfg.active ? 1 : 0);
+    writeDword(L"ShowBanner",    g_cfg.banner         ? 1 : 0);
+    writeDword(L"EmitSound",     g_cfg.sound          ? 1 : 0);
+    writeDword(L"ChangeIcon",    g_cfg.icon_chg       ? 1 : 0);
+    writeDword(L"Active",        g_cfg.active         ? 1 : 0);
     writeDword(L"AddressedOnly", g_cfg.addressed_only ? 1 : 0);
 
     RegCloseKey(hKey);
@@ -420,12 +418,12 @@ static void SaveConfig() {
 
 static void AddTrayIcon() {
     NOTIFYICONDATAW nid{};
-    nid.cbSize = sizeof(nid);
-    nid.hWnd = g_hwndMain;
-    nid.uID = 1;
-    nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    nid.cbSize           = sizeof(nid);
+    nid.hWnd             = g_hwndMain;
+    nid.uID              = 1;
+    nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = g_iconNormal;
+    nid.hIcon            = g_iconNormal;
     wcscpy_s(nid.szTip, L"GNZ Notification Agent");
     Shell_NotifyIconW(NIM_ADD, &nid);
 }
@@ -433,33 +431,33 @@ static void AddTrayIcon() {
 static void UpdateTrayIcon(bool alert) {
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
-    nid.hWnd = g_hwndMain;
-    nid.uID = 1;
+    nid.hWnd   = g_hwndMain;
+    nid.uID    = 1;
     nid.uFlags = NIF_ICON | NIF_TIP;
-    nid.hIcon = alert ? g_iconAlert : g_iconNormal;
+    nid.hIcon  = alert ? g_iconAlert : g_iconNormal;
     wcscpy_s(nid.szTip, alert
-        ? L"GNZ Notification Agent  [New alerts]"
-        : L"GNZ Notification Agent");
+             ? L"GNZ Notification Agent  [New alerts]"
+             : L"GNZ Notification Agent");
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 static void UpdateTrayTip(bool connected) {
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
-    nid.hWnd = g_hwndMain;
-    nid.uID = 1;
+    nid.hWnd   = g_hwndMain;
+    nid.uID    = 1;
     nid.uFlags = NIF_TIP;
     wcscpy_s(nid.szTip, connected
-        ? L"GNZ Notification Agent  [connected]"
-        : L"GNZ Notification Agent  [disconnected]");
+             ? L"GNZ Notification Agent  [connected]"
+             : L"GNZ Notification Agent  [disconnected]");
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 static void RemoveTrayIcon() {
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
-    nid.hWnd = g_hwndMain;
-    nid.uID = 1;
+    nid.hWnd   = g_hwndMain;
+    nid.uID    = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
@@ -472,28 +470,27 @@ static void StopPoll();
 
 DWORD WINAPI PollThreadProc(LPVOID) {
     // Capture config snapshot; config only changes when this thread is restarted.
-    const std::string addr = WideToUtf8(g_cfg.server);
-    const int         port = g_cfg.port;
+    const std::string addr     = WideToUtf8(g_cfg.server);
+    const int         port     = g_cfg.port;
     const DWORD       interval = static_cast<DWORD>(g_cfg.interval);
 
     bool was_connected = false;
-    int  last_id = 0;
+    int  last_id       = 0;
 
     while (g_pollActive) {
         bool connected = false;
 
         auto res = DoHttpRequest(addr, port, "GET", "/api/alerts");
         if (res.ok && res.status == 200) {
-            connected = true;
+            connected               = true;
             const bool is_reconnect = !was_connected;
-            auto all = ParseAlertsResponse(res.body);
+            auto all                = ParseAlertsResponse(res.body);
 
             // Determine new alerts
             std::vector<Alert> fresh;
             if (is_reconnect) {
                 fresh = all;   // full refresh on (re)connect
-            }
-            else {
+            } else {
                 for (auto& a : all)
                     if (a.id > last_id) fresh.push_back(a);
             }
@@ -505,7 +502,7 @@ DWORD WINAPI PollThreadProc(LPVOID) {
             // Post to main thread if there is anything to report
             if (!fresh.empty() || is_reconnect) {
                 EnterCriticalSection(&g_pendingCS);
-                g_pending.alerts = std::move(fresh);
+                g_pending.alerts       = std::move(fresh);
                 g_pending.full_refresh = is_reconnect;
                 LeaveCriticalSection(&g_pendingCS);
                 PostMessage(g_hwndMain, WM_NEW_ALERTS, 0, 0);
@@ -514,7 +511,7 @@ DWORD WINAPI PollThreadProc(LPVOID) {
 
         if (connected != was_connected)
             PostMessage(g_hwndMain, WM_POLL_STATUS,
-                connected ? 1 : 0, 0);
+                        connected ? 1 : 0, 0);
         was_connected = connected;
 
         // Sleep until interval elapses or we're woken (stop/config change)
@@ -527,7 +524,7 @@ static void StartPoll() {
     g_pollActive = true;
     ResetEvent(g_pollWake);
     g_pollThread = CreateThread(nullptr, 0, PollThreadProc,
-        nullptr, 0, nullptr);
+                                nullptr, 0, nullptr);
 }
 
 static void StopPoll() {
@@ -551,19 +548,19 @@ static void RestartPoll() {
 
 // Adds one alert row at the top of the ListView (newest-first order).
 static void AddAlertToListView(HWND hList, const Alert& a) {
-    std::wstring wid = std::to_wstring(a.id);
+    std::wstring wid   = std::to_wstring(a.id);
     std::wstring wtime = Utf8ToWide(a.timestamp);
     std::wstring wlink = Utf8ToWide(a.link);
-    std::wstring wev = Utf8ToWide(a.event);
-    std::wstring wkey = Utf8ToWide(a.issue_key);
+    std::wstring wev   = Utf8ToWide(a.event);
+    std::wstring wkey  = Utf8ToWide(a.issue_key);
     std::wstring wuser = Utf8ToWide(a.user);
-    std::wstring wsum = Utf8ToWide(a.summary);
+    std::wstring wsum  = Utf8ToWide(a.summary);
 
     LVITEMW lvi{};
-    lvi.mask = LVIF_TEXT | LVIF_PARAM;
-    lvi.iItem = 0;   // insert at top
+    lvi.mask    = LVIF_TEXT | LVIF_PARAM;
+    lvi.iItem   = 0;   // insert at top
     lvi.pszText = const_cast<wchar_t*>(wid.c_str());
-    lvi.lParam = static_cast<LPARAM>(a.id);
+    lvi.lParam  = static_cast<LPARAM>(a.id);
     int row = ListView_InsertItem(hList, &lvi);
     if (row < 0) return;
 
@@ -588,7 +585,7 @@ static void PopulateAlertsList(HWND hList) {
 // ---------------------------------------------------------------------------
 
 static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg,
-    WPARAM wParam, LPARAM lParam) {
+                                       WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
         SetTimer(hwnd, BANNER_TIMER, BANNER_MS, nullptr);
@@ -609,7 +606,7 @@ static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg,
     case WM_LBUTTONDOWN:
         if (!g_bannerLink.empty())
             ShellExecuteW(nullptr, L"open", g_bannerLink.c_str(),
-                nullptr, nullptr, SW_SHOWNORMAL);
+                          nullptr, nullptr, SW_SHOWNORMAL);
         DestroyWindow(hwnd);
         break;
 
@@ -634,22 +631,22 @@ static void ShowBanner(const Alert& a) {
     if (g_hwndBanner) DestroyWindow(g_hwndBanner);
 
     // Build display strings
-    std::wstring key = Utf8ToWide(a.issue_key);
-    std::wstring pri = Utf8ToWide(a.priority);
-    std::wstring sum = Utf8ToWide(a.summary);
+    std::wstring key  = Utf8ToWide(a.issue_key);
+    std::wstring pri  = Utf8ToWide(a.priority);
+    std::wstring sum  = Utf8ToWide(a.summary);
 
     g_bannerLine1 = key;
     if (!pri.empty()) g_bannerLine1 += L"  [" + pri + L"]";
     g_bannerLine2 = sum.size() > 60
-        ? sum.substr(0, 57) + L"..."
-        : sum;
-    g_bannerLink = Utf8ToWide(a.link);
+                  ? sum.substr(0, 57) + L"..."
+                  : sum;
+    g_bannerLink  = Utf8ToWide(a.link);
 
     // Position at bottom-right of work area
     RECT wa{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     const int W = 390, H = 110;
-    int x = wa.right - W - 12;
+    int x = wa.right  - W - 12;
     int y = wa.bottom - H - 12;
 
     // Title bar text: event type
@@ -667,22 +664,22 @@ static void ShowBanner(const Alert& a) {
 
     // Line 1 — issue key + priority
     CreateWindowExW(0, L"STATIC", g_bannerLine1.c_str(),
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        8, 4, W - 20, 24,
-        g_hwndBanner, nullptr, g_hInst, nullptr);
+                    WS_CHILD | WS_VISIBLE | SS_LEFT,
+                    8, 4, W - 20, 24,
+                    g_hwndBanner, nullptr, g_hInst, nullptr);
 
     // Line 2 — summary
     CreateWindowExW(0, L"STATIC", g_bannerLine2.c_str(),
-        WS_CHILD | WS_VISIBLE | SS_LEFT,
-        8, 30, W - 20, 40,
-        g_hwndBanner, nullptr, g_hInst, nullptr);
+                    WS_CHILD | WS_VISIBLE | SS_LEFT,
+                    8, 30, W - 20, 40,
+                    g_hwndBanner, nullptr, g_hInst, nullptr);
 
     // Line 3 — click hint shown only when a link is available
     if (!g_bannerLink.empty())
         CreateWindowExW(0, L"STATIC", L"Click to open in Jira",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            8, 74, W - 20, 18,
-            g_hwndBanner, nullptr, g_hInst, nullptr);
+                        WS_CHILD | WS_VISIBLE | SS_LEFT,
+                        8, 74, W - 20, 18,
+                        g_hwndBanner, nullptr, g_hInst, nullptr);
 
     ShowWindow(g_hwndBanner, SW_SHOWNOACTIVATE);
     UpdateWindow(g_hwndBanner);
@@ -693,63 +690,63 @@ static void ShowBanner(const Alert& a) {
 // ---------------------------------------------------------------------------
 
 static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg,
-    WPARAM wParam, LPARAM lParam) {
+                                       WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         auto lbl = [&](const wchar_t* text, int x, int y, int w) {
             CreateWindowExW(0, L"STATIC", text,
-                WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                x, y, w, 20, hwnd, nullptr, g_hInst, nullptr);
-            };
+                            WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                            x, y, w, 20, hwnd, nullptr, g_hInst, nullptr);
+        };
         auto edt = [&](int id, const wchar_t* init, int x, int y, int w) {
             HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", init,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                x, y, w, 22, hwnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                g_hInst, nullptr);
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                     x, y, w, 22, hwnd,
+                                     reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                                     g_hInst, nullptr);
             return h;
-            };
+        };
         auto chk = [&](int id, const wchar_t* text, bool checked, int y) {
             HWND h = CreateWindowExW(0, L"BUTTON", text,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                20, y, 360, 22, hwnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
-                g_hInst, nullptr);
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                     20, y, 360, 22, hwnd,
+                                     reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+                                     g_hInst, nullptr);
             Button_SetCheck(h, checked ? BST_CHECKED : BST_UNCHECKED);
-            };
+        };
 
         lbl(L"Server address:", 10, 14, 130);
         wchar_t portBuf[16], intBuf[16];
         swprintf_s(portBuf, L"%d", g_cfg.port);
-        swprintf_s(intBuf, L"%d", g_cfg.interval);
-        edt(IDC_EDIT_SERVER, g_cfg.server.c_str(), 148, 12, 220);
-        lbl(L"API port:", 10, 44, 130);
-        edt(IDC_EDIT_PORT, portBuf, 148, 42, 70);
-        lbl(L"Poll interval:", 10, 74, 130);
-        HWND hInt = edt(IDC_EDIT_INTERVAL, intBuf, 148, 72, 70);
+        swprintf_s(intBuf,  L"%d", g_cfg.interval);
+        edt(IDC_EDIT_SERVER,   g_cfg.server.c_str(), 148, 12, 220);
+        lbl(L"API port:",       10, 44, 130);
+        edt(IDC_EDIT_PORT,     portBuf,              148, 42, 70);
+        lbl(L"Poll interval:",  10, 74, 130);
+        HWND hInt = edt(IDC_EDIT_INTERVAL, intBuf,  148, 72, 70);
         CreateWindowExW(0, L"STATIC", L"ms", WS_CHILD | WS_VISIBLE,
-            224, 74, 30, 20, hwnd, nullptr, g_hInst, nullptr);
+                        224, 74, 30, 20, hwnd, nullptr, g_hInst, nullptr);
         (void)hInt;
 
-        chk(IDC_CHK_BANNER, L"Show banner notification on new alert",
-            g_cfg.banner, 110);
-        chk(IDC_CHK_SOUND, L"Play sound on new alert",
-            g_cfg.sound, 136);
-        chk(IDC_CHK_ICON, L"Change tray icon when alerts are pending",
-            g_cfg.icon_chg, 162);
-        chk(IDC_CHK_ACTIVE, L"Active (receive and display alerts)",
-            g_cfg.active, 188);
-        chk(IDC_CHK_ADDRESSED, L"Addressed to me only (notify only if assignee = current user)",
+        chk(IDC_CHK_BANNER,     L"Show banner notification on new alert",
+            g_cfg.banner,        110);
+        chk(IDC_CHK_SOUND,      L"Play sound on new alert",
+            g_cfg.sound,         136);
+        chk(IDC_CHK_ICON,       L"Change tray icon when alerts are pending",
+            g_cfg.icon_chg,      162);
+        chk(IDC_CHK_ACTIVE,     L"Active (receive and display alerts)",
+            g_cfg.active,        188);
+        chk(IDC_CHK_ADDRESSED,  L"Addressed to me only (notify only if assignee = current user)",
             g_cfg.addressed_only, 214);
 
         CreateWindowExW(0, L"BUTTON", L"OK",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            220, 252, 80, 28, hwnd,
-            reinterpret_cast<HMENU>(IDC_CFG_OK), g_hInst, nullptr);
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                        220, 252, 80, 28, hwnd,
+                        reinterpret_cast<HMENU>(IDC_CFG_OK), g_hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"Cancel",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            316, 252, 80, 28, hwnd,
-            reinterpret_cast<HMENU>(IDC_CFG_CANCEL), g_hInst, nullptr);
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        316, 252, 80, 28, hwnd,
+                        reinterpret_cast<HMENU>(IDC_CFG_CANCEL), g_hInst, nullptr);
         break;
     }
 
@@ -757,19 +754,19 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg,
         switch (LOWORD(wParam)) {
         case IDC_CFG_OK: {
             // Read and validate inputs
-            wchar_t srv[256] = {}; GetDlgItemTextW(hwnd, IDC_EDIT_SERVER, srv, 256);
-            wchar_t prt[16] = {}; GetDlgItemTextW(hwnd, IDC_EDIT_PORT, prt, 16);
-            wchar_t itv[16] = {}; GetDlgItemTextW(hwnd, IDC_EDIT_INTERVAL, itv, 16);
+            wchar_t srv[256]  = {}; GetDlgItemTextW(hwnd, IDC_EDIT_SERVER,   srv, 256);
+            wchar_t prt[16]   = {}; GetDlgItemTextW(hwnd, IDC_EDIT_PORT,     prt, 16);
+            wchar_t itv[16]   = {}; GetDlgItemTextW(hwnd, IDC_EDIT_INTERVAL, itv, 16);
 
             if (wcslen(srv) == 0) {
                 MessageBoxW(hwnd, L"Server address cannot be empty.",
-                    L"Validation", MB_OK | MB_ICONWARNING);
+                            L"Validation", MB_OK | MB_ICONWARNING);
                 break;
             }
             int port = _wtoi(prt), intv = _wtoi(itv);
             if (port < 1 || port > 65535) {
                 MessageBoxW(hwnd, L"Port must be between 1 and 65535.",
-                    L"Validation", MB_OK | MB_ICONWARNING);
+                            L"Validation", MB_OK | MB_ICONWARNING);
                 break;
             }
             if (intv < 1000 || intv > 300000) {
@@ -779,14 +776,14 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg,
                 break;
             }
 
-            g_cfg.server = srv;
-            g_cfg.port = port;
+            g_cfg.server   = srv;
+            g_cfg.port     = port;
             g_cfg.interval = intv;
-            g_cfg.banner = (IsDlgButtonChecked(hwnd, IDC_CHK_BANNER) == BST_CHECKED);
-            g_cfg.sound = (IsDlgButtonChecked(hwnd, IDC_CHK_SOUND) == BST_CHECKED);
-            g_cfg.icon_chg = (IsDlgButtonChecked(hwnd, IDC_CHK_ICON) == BST_CHECKED);
-            g_cfg.active = (IsDlgButtonChecked(hwnd, IDC_CHK_ACTIVE) == BST_CHECKED);
-            g_cfg.addressed_only = (IsDlgButtonChecked(hwnd, IDC_CHK_ADDRESSED) == BST_CHECKED);
+            g_cfg.banner          = (IsDlgButtonChecked(hwnd, IDC_CHK_BANNER)    == BST_CHECKED);
+            g_cfg.sound           = (IsDlgButtonChecked(hwnd, IDC_CHK_SOUND)     == BST_CHECKED);
+            g_cfg.icon_chg        = (IsDlgButtonChecked(hwnd, IDC_CHK_ICON)      == BST_CHECKED);
+            g_cfg.active          = (IsDlgButtonChecked(hwnd, IDC_CHK_ACTIVE)    == BST_CHECKED);
+            g_cfg.addressed_only  = (IsDlgButtonChecked(hwnd, IDC_CHK_ADDRESSED) == BST_CHECKED);
 
             SaveConfig();
             RestartPoll();   // apply new server/port/interval
@@ -834,7 +831,7 @@ static void ShowConfigWindow() {
 // ---------------------------------------------------------------------------
 
 static int g_sortCol = -1;   // -1 = unsorted
-static int g_sortDir = 1;   //  1 = ascending, -1 = descending
+static int g_sortDir =  1;   //  1 = ascending, -1 = descending
 
 // Callback for ListView_SortItemsEx; lp1/lp2 are item indices.
 static int CALLBACK AlertSortProc(LPARAM lp1, LPARAM lp2, LPARAM data) {
@@ -855,7 +852,7 @@ static int CALLBACK AlertSortProc(LPARAM lp1, LPARAM lp2, LPARAM data) {
 // ---------------------------------------------------------------------------
 
 static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
-    WPARAM wParam, LPARAM lParam) {
+                                       WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         // ListView
@@ -875,10 +872,10 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
         };
         for (int i = 0; i < 7; ++i) {
             LVCOLUMNW lvc{};
-            lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            lvc.mask     = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
             lvc.iSubItem = i;
-            lvc.pszText = const_cast<wchar_t*>(cols[i].name);
-            lvc.cx = cols[i].w;
+            lvc.pszText  = const_cast<wchar_t*>(cols[i].name);
+            lvc.cx       = cols[i].w;
             ListView_InsertColumn(hList, i, &lvc);
         }
 
@@ -886,13 +883,13 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
         {
             HKEY hKey = nullptr;
             if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH, 0,
-                KEY_READ, &hKey) == ERROR_SUCCESS) {
+                              KEY_READ, &hKey) == ERROR_SUCCESS) {
                 for (int i = 0; i < 7; ++i) {
                     wchar_t name[32];
                     swprintf_s(name, L"ColWidth%d", i);
                     DWORD w = 0, sz = sizeof(w), type = REG_DWORD;
                     if (RegQueryValueExW(hKey, name, nullptr, &type,
-                        reinterpret_cast<LPBYTE>(&w), &sz) == ERROR_SUCCESS
+                                        reinterpret_cast<LPBYTE>(&w), &sz) == ERROR_SUCCESS
                         && w > 0)
                         ListView_SetColumnWidth(hList, i, static_cast<int>(w));
                 }
@@ -902,17 +899,17 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
 
         // Buttons
         CreateWindowExW(0, L"BUTTON", L"Delete Selected",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            4, 0, 130, 26, hwnd,
-            reinterpret_cast<HMENU>(IDC_BTN_DEL_SEL), g_hInst, nullptr);
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        4, 0, 130, 26, hwnd,
+                        reinterpret_cast<HMENU>(IDC_BTN_DEL_SEL), g_hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"Clear All",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            140, 0, 90, 26, hwnd,
-            reinterpret_cast<HMENU>(IDC_BTN_CLEAR_ALL), g_hInst, nullptr);
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        140, 0, 90, 26, hwnd,
+                        reinterpret_cast<HMENU>(IDC_BTN_CLEAR_ALL), g_hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"Refresh",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            236, 0, 80, 26, hwnd,
-            reinterpret_cast<HMENU>(IDC_BTN_REFRESH), g_hInst, nullptr);
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                        236, 0, 80, 26, hwnd,
+                        reinterpret_cast<HMENU>(IDC_BTN_REFRESH), g_hInst, nullptr);
 
         PopulateAlertsList(hList);
         break;
@@ -922,11 +919,11 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
         HWND hList = GetDlgItem(hwnd, IDC_LIST_ALERTS);
         RECT r; GetClientRect(hwnd, &r);
         const int BTN_H = 30;
-        MoveWindow(hList, 0, BTN_H, r.right, r.bottom - BTN_H, TRUE);
+        MoveWindow(hList,  0, BTN_H, r.right, r.bottom - BTN_H, TRUE);
         // Re-anchor buttons to top
-        MoveWindow(GetDlgItem(hwnd, IDC_BTN_DEL_SEL), 4, 2, 130, 26, TRUE);
-        MoveWindow(GetDlgItem(hwnd, IDC_BTN_CLEAR_ALL), 140, 2, 90, 26, TRUE);
-        MoveWindow(GetDlgItem(hwnd, IDC_BTN_REFRESH), 236, 2, 80, 26, TRUE);
+        MoveWindow(GetDlgItem(hwnd, IDC_BTN_DEL_SEL),  4,   2, 130, 26, TRUE);
+        MoveWindow(GetDlgItem(hwnd, IDC_BTN_CLEAR_ALL), 140, 2,  90, 26, TRUE);
+        MoveWindow(GetDlgItem(hwnd, IDC_BTN_REFRESH),   236, 2,  80, 26, TRUE);
         break;
     }
 
@@ -948,19 +945,19 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
 
             for (int i = static_cast<int>(rows.size()) - 1; i >= 0; --i) {
                 LVITEMW lvi{};
-                lvi.mask = LVIF_PARAM;
-                lvi.iItem = rows[static_cast<size_t>(i)];
+                lvi.mask   = LVIF_PARAM;
+                lvi.iItem  = rows[static_cast<size_t>(i)];
                 if (!ListView_GetItem(hList, &lvi)) continue;
                 int alertId = static_cast<int>(lvi.lParam);
 
                 // Ask the server to delete it
                 DoHttpRequest(addr, port, "DELETE",
-                    "/api/alerts/" + std::to_string(alertId));
+                              "/api/alerts/" + std::to_string(alertId));
 
                 // Remove from local cache and ListView
                 g_alerts.erase(
                     std::remove_if(g_alerts.begin(), g_alerts.end(),
-                        [alertId](const Alert& a) { return a.id == alertId; }),
+                                   [alertId](const Alert& a){ return a.id == alertId; }),
                     g_alerts.end());
                 ListView_DeleteItem(hList, rows[static_cast<size_t>(i)]);
             }
@@ -969,10 +966,10 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
 
         if (LOWORD(wParam) == IDC_BTN_CLEAR_ALL) {
             if (MessageBoxW(hwnd, L"Clear all alerts from the server?",
-                L"Confirm", MB_YESNO | MB_ICONQUESTION) != IDYES)
+                            L"Confirm", MB_YESNO | MB_ICONQUESTION) != IDYES)
                 break;
             DoHttpRequest(WideToUtf8(g_cfg.server), g_cfg.port,
-                "DELETE", "/api/alerts");
+                          "DELETE", "/api/alerts");
             g_alerts.clear();
             ListView_DeleteAllItems(hList);
             break;
@@ -998,7 +995,7 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
                 ListView_GetItemText(pnm->hwndFrom, nia->iItem, 2, url, 2048);
                 if (wcslen(url) > 0)
                     ShellExecuteW(nullptr, L"open", url,
-                        nullptr, nullptr, SW_SHOWNORMAL);
+                                  nullptr, nullptr, SW_SHOWNORMAL);
             }
         }
         else if (pnm->code == LVN_COLUMNCLICK) {
@@ -1010,7 +1007,7 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
                 g_sortDir = 1;
             }
             ListView_SortItemsEx(pnm->hwndFrom, AlertSortProc,
-                reinterpret_cast<LPARAM>(pnm->hwndFrom));
+                                 reinterpret_cast<LPARAM>(pnm->hwndFrom));
         }
         break;
     }
@@ -1022,8 +1019,8 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
     case WM_DESTROY: {
         HKEY hKey = nullptr;
         if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, nullptr,
-            REG_OPTION_NON_VOLATILE, KEY_WRITE,
-            nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
+                            REG_OPTION_NON_VOLATILE, KEY_WRITE,
+                            nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
             // Save column widths
             HWND hList = GetDlgItem(hwnd, IDC_LIST_ALERTS);
             for (int i = 0; i < 7; ++i) {
@@ -1031,23 +1028,23 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
                 swprintf_s(name, L"ColWidth%d", i);
                 DWORD w = static_cast<DWORD>(ListView_GetColumnWidth(hList, i));
                 RegSetValueExW(hKey, name, 0, REG_DWORD,
-                    reinterpret_cast<const BYTE*>(&w), sizeof(DWORD));
+                               reinterpret_cast<const BYTE*>(&w), sizeof(DWORD));
             }
             // Save window position and size
             RECT r{};
             GetWindowRect(hwnd, &r);
-            DWORD ww = static_cast<DWORD>(r.right - r.left);
+            DWORD ww = static_cast<DWORD>(r.right  - r.left);
             DWORD wh = static_cast<DWORD>(r.bottom - r.top);
             DWORD wx = static_cast<DWORD>(r.left);   // stored as DWORD (two's complement safe)
             DWORD wy = static_cast<DWORD>(r.top);
-            RegSetValueExW(hKey, L"AlertsWidth", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&ww), sizeof(DWORD));
+            RegSetValueExW(hKey, L"AlertsWidth",  0, REG_DWORD, reinterpret_cast<const BYTE*>(&ww), sizeof(DWORD));
             RegSetValueExW(hKey, L"AlertsHeight", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&wh), sizeof(DWORD));
-            RegSetValueExW(hKey, L"AlertsLeft", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&wx), sizeof(DWORD));
-            RegSetValueExW(hKey, L"AlertsTop", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&wy), sizeof(DWORD));
+            RegSetValueExW(hKey, L"AlertsLeft",   0, REG_DWORD, reinterpret_cast<const BYTE*>(&wx), sizeof(DWORD));
+            RegSetValueExW(hKey, L"AlertsTop",    0, REG_DWORD, reinterpret_cast<const BYTE*>(&wy), sizeof(DWORD));
             RegCloseKey(hKey);
         }
         g_hwndAlerts = nullptr;
-        g_hasAlert = false;
+        g_hasAlert   = false;
         if (g_cfg.icon_chg) UpdateTrayIcon(false);
         break;
     }
@@ -1066,19 +1063,29 @@ static void ShowAlertsWindow() {
     {
         HKEY hKey = nullptr;
         if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH, 0,
-            KEY_READ, &hKey) == ERROR_SUCCESS) {
+                          KEY_READ, &hKey) == ERROR_SUCCESS) {
             auto rd = [&](const wchar_t* name) -> DWORD {
                 DWORD v = 0, sz = sizeof(v), type = REG_DWORD;
                 RegQueryValueExW(hKey, name, nullptr, &type,
-                    reinterpret_cast<LPBYTE>(&v), &sz);
+                                 reinterpret_cast<LPBYTE>(&v), &sz);
                 return v;
-                };
+            };
             DWORD savedW = rd(L"AlertsWidth");
             if (savedW > 0) {
-                ww = static_cast<int>(savedW);
-                wh = static_cast<int>(rd(L"AlertsHeight"));
-                wx = static_cast<int>(rd(L"AlertsLeft"));   // DWORD → int handles negative coords
-                wy = static_cast<int>(rd(L"AlertsTop"));
+                int rx = static_cast<int>(rd(L"AlertsLeft"));
+                int ry = static_cast<int>(rd(L"AlertsTop"));
+                int rw = static_cast<int>(savedW);
+                int rh = static_cast<int>(rd(L"AlertsHeight"));
+
+                // Validate: coordinates 0–9999, dimensions 100–9999.
+                // Any value outside these ranges indicates corrupt/stale data.
+                if (rx >= 0 && rx <= 9999 &&
+                    ry >= 0 && ry <= 9999 &&
+                    rw >= 100 && rw <= 9999 &&
+                    rh >= 100 && rh <= 9999) {
+                    wx = rx; wy = ry; ww = rw; wh = rh;
+                }
+                // If validation fails, wx/wy/ww/wh keep their default values.
             }
             RegCloseKey(hKey);
         }
@@ -1103,16 +1110,16 @@ static void ShowAlertsWindow() {
 static void ShowTrayMenu() {
     POINT pt{}; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
-    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_STRING, IDM_SHOW, L"Show Alerts");
-    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_STRING, IDM_SHOW,      L"Show Alerts");
+    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_SEPARATOR, 0,          nullptr);
     InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_STRING, IDM_CONFIGURE, L"Configure...");
-    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_STRING, IDM_EXIT, L"Exit");
+    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_SEPARATOR, 0,          nullptr);
+    InsertMenuW(hMenu, (UINT)-1, MF_BYPOSITION | MF_STRING, IDM_EXIT,      L"Exit");
 
     // Required so the menu closes if the user clicks elsewhere
     SetForegroundWindow(g_hwndMain);
     TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN,
-        pt.x, pt.y, 0, g_hwndMain, nullptr);
+                   pt.x, pt.y, 0, g_hwndMain, nullptr);
     DestroyMenu(hMenu);
 }
 
@@ -1121,7 +1128,7 @@ static void ShowTrayMenu() {
 // ---------------------------------------------------------------------------
 
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
-    WPARAM wParam, LPARAM lParam) {
+                                     WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
         g_hwndMain = hwnd;
@@ -1152,7 +1159,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
         // Drain pending update from poll thread
         PendingUpdate upd;
         EnterCriticalSection(&g_pendingCS);
-        upd = std::move(g_pending);
+        upd               = std::move(g_pending);
         g_pending.alerts.clear();
         g_pending.full_refresh = false;
         LeaveCriticalSection(&g_pendingCS);
@@ -1168,23 +1175,22 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
             HWND hList = GetDlgItem(g_hwndAlerts, IDC_LIST_ALERTS);
             if (upd.full_refresh) {
                 PopulateAlertsList(hList);
-            }
-            else {
+            } else {
                 for (const auto& a : upd.alerts)
                     AddAlertToListView(hList, a);
             }
         }
 
-        // Notify about new alerts — honour the addressed-to-me filter.
-        // The alerts list window always shows everything; only the notification
-        // (banner / sound / icon) is suppressed for non-matching alerts.
-        if (!upd.alerts.empty()) {
+        // Notify only for genuinely new alerts (incremental updates).
+        // A full refresh is the initial load of existing data — those alerts
+        // are not new events and must not trigger sound/banner/icon.
+        if (!upd.alerts.empty() && !upd.full_refresh) {
             // Find the most-recent alert that passes the filter.
             const Alert* notify = nullptr;
             for (auto it = upd.alerts.rbegin(); it != upd.alerts.rend(); ++it) {
                 if (!g_cfg.addressed_only ||
                     _wcsicmp(Utf8ToWide(it->user).c_str(),
-                        g_windowsUser.c_str()) == 0) {
+                             g_windowsUser.c_str()) == 0) {
                     notify = &(*it);
                     break;
                 }
@@ -1237,7 +1243,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Capture the logged-on username once for the addressed-to-me filter.
     {
         wchar_t uname[256] = {};
-        DWORD   len = 256;
+        DWORD   len        = 256;
         if (GetUserNameW(uname, &len)) g_windowsUser = uname;
     }
 
@@ -1247,27 +1253,27 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Replace with LoadImageW from your own .ico for a custom icon.
     g_iconNormal = static_cast<HICON>(
         LoadImageW(hInst, MAKEINTRESOURCEW(IDI_GNZNOTIFICATIONAGENT),
-            IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
-    g_iconAlert = static_cast<HICON>(
+                   IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
+    g_iconAlert  = static_cast<HICON>(
         LoadImageW(hInst, MAKEINTRESOURCEW(IDI_GNZNOTIFICATIONAGENT),
-            IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
+                   IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
 
     // Register window classes
     auto reg = [&](const wchar_t* cls, WNDPROC proc, HBRUSH bg) {
         WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = proc;
-        wc.hInstance = hInst;
-        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = proc;
+        wc.hInstance     = hInst;
+        wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
         wc.hbrBackground = bg;
-        wc.hIcon = static_cast<HICON>(LoadImageW(
-            hInst, MAKEINTRESOURCEW(IDI_GNZNOTIFICATIONAGENT),
-            IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
+        wc.hIcon         = static_cast<HICON>(LoadImageW(
+                               hInst, MAKEINTRESOURCEW(IDI_GNZNOTIFICATIONAGENT),
+                               IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
         wc.lpszClassName = cls;
         RegisterClassExW(&wc);
-        };
+    };
 
-    reg(WC_MAIN, MainWndProc, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+    reg(WC_MAIN,   MainWndProc,   reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
     reg(WC_ALERTS, AlertsWndProc, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
     reg(WC_CONFIG, ConfigWndProc, reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1));
     reg(WC_BANNER, BannerWndProc, reinterpret_cast<HBRUSH>(COLOR_INFOBK + 1));
@@ -1300,3 +1306,4 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     return static_cast<int>(msg.wParam);
 }
+
