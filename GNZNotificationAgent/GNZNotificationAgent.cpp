@@ -61,6 +61,7 @@
 #define IDC_CHK_SOUND      204
 #define IDC_CHK_ICON       205
 #define IDC_CHK_ACTIVE     208
+#define IDC_CHK_ADDRESSED  209
 #define IDC_CFG_OK         206
 #define IDC_CFG_CANCEL     207
 
@@ -102,6 +103,7 @@ struct Alert {
     std::string  reporter;
     std::string  status;
     std::string  link;      // Jira browse URL
+    std::string  user;      // assignee login name (empty if unassigned)
 };
 
 struct AgentConfig {
@@ -112,6 +114,7 @@ struct AgentConfig {
     bool         sound = true;
     bool         icon_chg = false;
     bool         active = true;
+    bool         addressed_only = true;   // notify only when assignee == current user
 };
 
 // Data marshalled from poll thread to main thread
@@ -136,6 +139,7 @@ static bool  g_hasAlert = false;          // true while unacknowledged alerts ex
 
 static AgentConfig g_cfg;
 static std::vector<Alert> g_alerts;         // local alert cache (main thread only)
+static std::wstring g_windowsUser;          // current logged-on username (for addressed-only filter)
 
 // Poll thread
 static std::atomic<bool> g_pollActive{ false };
@@ -149,6 +153,7 @@ static CRITICAL_SECTION  g_pendingCS;
 // Banner content (set before creating banner window)
 static std::wstring g_bannerLine1;   // e.g. "PROJ-123  [High]"
 static std::wstring g_bannerLine2;   // summary text
+static std::wstring g_bannerLink;    // Jira browse URL — opened on click (empty = no link)
 
 // ---------------------------------------------------------------------------
 // String conversion
@@ -336,6 +341,7 @@ static std::vector<Alert> ParseAlertsResponse(const std::string& json) {
                 a.reporter = JsonGet(obj, "reporter");
                 a.status = JsonGet(obj, "status");
                 a.link = JsonGet(obj, "link");
+                a.user = JsonGet(obj, "user");
                 if (a.id > 0) result.push_back(std::move(a));
                 objStart = std::string::npos;
             }
@@ -377,6 +383,7 @@ static void LoadConfig() {
     g_cfg.sound = readDword(L"EmitSound", 1) != 0;
     g_cfg.icon_chg = readDword(L"ChangeIcon", 0) != 0;
     g_cfg.active = readDword(L"Active", 1) != 0;
+    g_cfg.addressed_only = readDword(L"AddressedOnly", 1) != 0;
 
     RegCloseKey(hKey);
 }
@@ -402,6 +409,7 @@ static void SaveConfig() {
     writeDword(L"EmitSound", g_cfg.sound ? 1 : 0);
     writeDword(L"ChangeIcon", g_cfg.icon_chg ? 1 : 0);
     writeDword(L"Active", g_cfg.active ? 1 : 0);
+    writeDword(L"AddressedOnly", g_cfg.addressed_only ? 1 : 0);
 
     RegCloseKey(hKey);
 }
@@ -548,6 +556,7 @@ static void AddAlertToListView(HWND hList, const Alert& a) {
     std::wstring wlink = Utf8ToWide(a.link);
     std::wstring wev = Utf8ToWide(a.event);
     std::wstring wkey = Utf8ToWide(a.issue_key);
+    std::wstring wuser = Utf8ToWide(a.user);
     std::wstring wsum = Utf8ToWide(a.summary);
 
     LVITEMW lvi{};
@@ -562,7 +571,8 @@ static void AddAlertToListView(HWND hList, const Alert& a) {
     ListView_SetItemText(hList, row, 2, const_cast<wchar_t*>(wlink.c_str()));
     ListView_SetItemText(hList, row, 3, const_cast<wchar_t*>(wev.c_str()));
     ListView_SetItemText(hList, row, 4, const_cast<wchar_t*>(wkey.c_str()));
-    ListView_SetItemText(hList, row, 5, const_cast<wchar_t*>(wsum.c_str()));
+    ListView_SetItemText(hList, row, 5, const_cast<wchar_t*>(wuser.c_str()));
+    ListView_SetItemText(hList, row, 6, const_cast<wchar_t*>(wsum.c_str()));
 }
 
 // Repopulates the ListView from g_alerts (newest at top).
@@ -588,8 +598,18 @@ static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg,
         if (wParam == BANNER_TIMER) DestroyWindow(hwnd);
         break;
 
+    case WM_SETCURSOR:
+        // Show a hand cursor when the banner has a clickable link
+        if (!g_bannerLink.empty()) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        break;
+
     case WM_LBUTTONDOWN:
-        // Click anywhere on the banner to dismiss
+        if (!g_bannerLink.empty())
+            ShellExecuteW(nullptr, L"open", g_bannerLink.c_str(),
+                nullptr, nullptr, SW_SHOWNORMAL);
         DestroyWindow(hwnd);
         break;
 
@@ -623,6 +643,7 @@ static void ShowBanner(const Alert& a) {
     g_bannerLine2 = sum.size() > 60
         ? sum.substr(0, 57) + L"..."
         : sum;
+    g_bannerLink = Utf8ToWide(a.link);
 
     // Position at bottom-right of work area
     RECT wa{};
@@ -655,6 +676,13 @@ static void ShowBanner(const Alert& a) {
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         8, 30, W - 20, 40,
         g_hwndBanner, nullptr, g_hInst, nullptr);
+
+    // Line 3 — click hint shown only when a link is available
+    if (!g_bannerLink.empty())
+        CreateWindowExW(0, L"STATIC", L"Click to open in Jira",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            8, 74, W - 20, 18,
+            g_hwndBanner, nullptr, g_hInst, nullptr);
 
     ShowWindow(g_hwndBanner, SW_SHOWNOACTIVATE);
     UpdateWindow(g_hwndBanner);
@@ -711,14 +739,16 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg,
             g_cfg.icon_chg, 162);
         chk(IDC_CHK_ACTIVE, L"Active (receive and display alerts)",
             g_cfg.active, 188);
+        chk(IDC_CHK_ADDRESSED, L"Addressed to me only (notify only if assignee = current user)",
+            g_cfg.addressed_only, 214);
 
         CreateWindowExW(0, L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            220, 224, 80, 28, hwnd,
+            220, 252, 80, 28, hwnd,
             reinterpret_cast<HMENU>(IDC_CFG_OK), g_hInst, nullptr);
         CreateWindowExW(0, L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            316, 224, 80, 28, hwnd,
+            316, 252, 80, 28, hwnd,
             reinterpret_cast<HMENU>(IDC_CFG_CANCEL), g_hInst, nullptr);
         break;
     }
@@ -756,6 +786,7 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg,
             g_cfg.sound = (IsDlgButtonChecked(hwnd, IDC_CHK_SOUND) == BST_CHECKED);
             g_cfg.icon_chg = (IsDlgButtonChecked(hwnd, IDC_CHK_ICON) == BST_CHECKED);
             g_cfg.active = (IsDlgButtonChecked(hwnd, IDC_CHK_ACTIVE) == BST_CHECKED);
+            g_cfg.addressed_only = (IsDlgButtonChecked(hwnd, IDC_CHK_ADDRESSED) == BST_CHECKED);
 
             SaveConfig();
             RestartPoll();   // apply new server/port/interval
@@ -789,7 +820,7 @@ static void ShowConfigWindow() {
         WS_EX_DLGMODALFRAME,
         WC_CONFIG, L"GNZ Agent Configuration",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 420, 310,
+        CW_USEDEFAULT, CW_USEDEFAULT, 420, 340,
         g_hwndMain, nullptr, g_hInst, nullptr);
 
     if (g_hwndConfig) {
@@ -836,12 +867,13 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
         ListView_SetExtendedListViewStyle(
             hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-        // Columns: 0=ID 1=Time 2=Link 3=Event 4=Key 5=Summary
+        // Columns: 0=ID 1=Time 2=Link 3=Event 4=Key 5=User 6=Summary
         struct { const wchar_t* name; int w; } cols[] = {
-            { L"ID",      50  }, { L"Time",    162 }, { L"Link",   120 },
-            { L"Event",  130  }, { L"Key",      80 }, { L"Summary", 260 }
+            { L"ID",      50  }, { L"Time",    162 }, { L"Link",    120 },
+            { L"Event",  130  }, { L"Key",      80 }, { L"User",    100 },
+            { L"Summary", 260 }
         };
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 7; ++i) {
             LVCOLUMNW lvc{};
             lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
             lvc.iSubItem = i;
@@ -855,7 +887,7 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
             HKEY hKey = nullptr;
             if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH, 0,
                 KEY_READ, &hKey) == ERROR_SUCCESS) {
-                for (int i = 0; i < 6; ++i) {
+                for (int i = 0; i < 7; ++i) {
                     wchar_t name[32];
                     swprintf_s(name, L"ColWidth%d", i);
                     DWORD w = 0, sz = sizeof(w), type = REG_DWORD;
@@ -958,7 +990,7 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
         NMHDR* pnm = reinterpret_cast<NMHDR*>(lParam);
         if (pnm->idFrom != IDC_LIST_ALERTS) break;
 
-        if (pnm->code == NM_CLICK) {
+        if (pnm->code == NM_DBLCLK) {
             // Single-click on the Link column opens the URL in the browser.
             NMITEMACTIVATE* nia = reinterpret_cast<NMITEMACTIVATE*>(lParam);
             if (nia->iSubItem == 2 && nia->iItem >= 0) {
@@ -994,7 +1026,7 @@ static LRESULT CALLBACK AlertsWndProc(HWND hwnd, UINT msg,
             nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
             // Save column widths
             HWND hList = GetDlgItem(hwnd, IDC_LIST_ALERTS);
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < 7; ++i) {
                 wchar_t name[32];
                 swprintf_s(name, L"ColWidth%d", i);
                 DWORD w = static_cast<DWORD>(ListView_GetColumnWidth(hList, i));
@@ -1143,11 +1175,25 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
             }
         }
 
-        // Notify the user about new (non-refresh) alerts
+        // Notify about new alerts — honour the addressed-to-me filter.
+        // The alerts list window always shows everything; only the notification
+        // (banner / sound / icon) is suppressed for non-matching alerts.
         if (!upd.alerts.empty()) {
-            if (g_cfg.sound)    MessageBeep(MB_ICONINFORMATION);
-            if (g_cfg.icon_chg) { g_hasAlert = true; UpdateTrayIcon(true); }
-            if (g_cfg.banner)   ShowBanner(upd.alerts.back());
+            // Find the most-recent alert that passes the filter.
+            const Alert* notify = nullptr;
+            for (auto it = upd.alerts.rbegin(); it != upd.alerts.rend(); ++it) {
+                if (!g_cfg.addressed_only ||
+                    _wcsicmp(Utf8ToWide(it->user).c_str(),
+                        g_windowsUser.c_str()) == 0) {
+                    notify = &(*it);
+                    break;
+                }
+            }
+            if (notify) {
+                if (g_cfg.sound)    MessageBeep(MB_ICONINFORMATION);
+                if (g_cfg.icon_chg) { g_hasAlert = true; UpdateTrayIcon(true); }
+                if (g_cfg.banner)   ShowBanner(*notify);
+            }
         }
         break;
     }
@@ -1188,6 +1234,13 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     InitializeCriticalSection(&g_pendingCS);
 
     // Load config from registry (create keys + defaults if missing)
+    // Capture the logged-on username once for the addressed-to-me filter.
+    {
+        wchar_t uname[256] = {};
+        DWORD   len = 256;
+        if (GetUserNameW(uname, &len)) g_windowsUser = uname;
+    }
+
     LoadConfig();
 
     // Load icons: system stock icons used to avoid needing a .rc file.

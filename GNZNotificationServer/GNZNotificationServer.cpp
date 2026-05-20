@@ -84,6 +84,7 @@ struct Alert {
     std::string reporter;
     std::string status;
     std::string link;      // full Jira browse URL, e.g. http://jira/browse/PROJ-1
+    std::string user;      // assignee login name (empty if unassigned)
 };
 
 struct ServerConfig {
@@ -303,7 +304,8 @@ static std::string AlertToJson(const Alert& a) {
         << "\"priority\":\"" << JsonEsc(a.priority) << "\","
         << "\"reporter\":\"" << JsonEsc(a.reporter) << "\","
         << "\"status\":\"" << JsonEsc(a.status) << "\","
-        << "\"link\":\"" << JsonEsc(a.link) << "\""
+        << "\"link\":\"" << JsonEsc(a.link) << "\","
+        << "\"user\":\"" << JsonEsc(a.user) << "\""
         << '}';
     return ss.str();
 }
@@ -389,6 +391,11 @@ static Alert ParseJiraBody(const std::string& body) {
                 size_t projp = fields.find("\"project\"");
                 if (projp != std::string::npos)
                     a.project = JsonGet(fields.substr(projp), "key");
+
+                // assignee.name — empty string if the issue is unassigned
+                size_t ap = fields.find("\"assignee\"");
+                if (ap != std::string::npos)
+                    a.user = JsonGet(fields.substr(ap), "name");
             }
         }
     }
