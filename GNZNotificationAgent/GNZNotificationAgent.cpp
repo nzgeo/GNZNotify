@@ -1224,10 +1224,78 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
 }
 
 // ---------------------------------------------------------------------------
+// Auto-start (HKCU Run key)
+// ---------------------------------------------------------------------------
+
+static bool InstallAutoRun() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    LONG rc = RegSetValueExW(hKey, L"GNZNotificationAgent", 0, REG_SZ,
+                              reinterpret_cast<const BYTE*>(exePath),
+                              static_cast<DWORD>((wcslen(exePath) + 1) * sizeof(wchar_t)));
+    RegCloseKey(hKey);
+    return rc == ERROR_SUCCESS;
+}
+
+static bool UninstallAutoRun() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    LONG rc = RegDeleteValueW(hKey, L"GNZNotificationAgent");
+    RegCloseKey(hKey);
+    // ERROR_FILE_NOT_FOUND means it was already absent — treat as success.
+    return rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND;
+}
+
+// ---------------------------------------------------------------------------
 // WinMain
 // ---------------------------------------------------------------------------
 
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    // Handle install / uninstall command-line arguments before any UI is set up.
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv && argc >= 2) {
+            if (_wcsicmp(argv[1], L"install") == 0) {
+                LocalFree(argv);
+                if (InstallAutoRun())
+                    MessageBoxW(nullptr,
+                        L"GNZ Notification Agent has been registered to start automatically on login.",
+                        L"GNZ Agent — Installed", MB_OK | MB_ICONINFORMATION);
+                else
+                    MessageBoxW(nullptr,
+                        L"Failed to register auto-start.\n"
+                        L"Check that the executable path is accessible.",
+                        L"GNZ Agent — Error", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            if (_wcsicmp(argv[1], L"uninstall") == 0) {
+                LocalFree(argv);
+                if (UninstallAutoRun())
+                    MessageBoxW(nullptr,
+                        L"GNZ Notification Agent has been removed from auto-start.",
+                        L"GNZ Agent — Uninstalled", MB_OK | MB_ICONINFORMATION);
+                else
+                    MessageBoxW(nullptr,
+                        L"Failed to remove auto-start registration.",
+                        L"GNZ Agent — Error", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+        }
+        if (argv) LocalFree(argv);
+    }
+
     g_hInst = hInst;
 
     // Enable DPI awareness for clean rendering on high-DPI displays
