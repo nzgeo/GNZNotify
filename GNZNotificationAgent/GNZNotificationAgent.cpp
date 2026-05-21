@@ -145,6 +145,7 @@ static std::wstring g_windowsUser;          // current logged-on username (for a
 static std::atomic<bool> g_pollActive{ false };
 static HANDLE            g_pollWake = nullptr;   // auto-reset, signals stop/wake
 static HANDLE            g_pollThread = nullptr;
+static bool              g_initialLoadDone = false; // set by main thread after first full refresh
 
 // Pending update queue (poll thread writes, main thread drains)
 static PendingUpdate     g_pending;
@@ -1075,10 +1076,20 @@ static void ShowAlertsWindow() {
                 };
             DWORD savedW = rd(L"AlertsWidth");
             if (savedW > 0) {
-                ww = static_cast<int>(savedW);
-                wh = static_cast<int>(rd(L"AlertsHeight"));
-                wx = static_cast<int>(rd(L"AlertsLeft"));   // DWORD → int handles negative coords
-                wy = static_cast<int>(rd(L"AlertsTop"));
+                int rx = static_cast<int>(rd(L"AlertsLeft"));
+                int ry = static_cast<int>(rd(L"AlertsTop"));
+                int rw = static_cast<int>(savedW);
+                int rh = static_cast<int>(rd(L"AlertsHeight"));
+
+                // Validate: coordinates 0–9999, dimensions 100–9999.
+                // Any value outside these ranges indicates corrupt/stale data.
+                if (rx >= 0 && rx <= 9999 &&
+                    ry >= 0 && ry <= 9999 &&
+                    rw >= 100 && rw <= 9999 &&
+                    rh >= 100 && rh <= 9999) {
+                    wx = rx; wy = ry; ww = rw; wh = rh;
+                }
+                // If validation fails, wx/wy/ww/wh keep their default values.
             }
             RegCloseKey(hKey);
         }
@@ -1160,26 +1171,30 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
         // When inactive, discard silently — no list update, no notifications
         if (!g_cfg.active) break;
 
-        if (upd.full_refresh) g_alerts.clear();
-        for (auto& a : upd.alerts) g_alerts.push_back(a);
-
-        // Update ListView if open
-        if (g_hwndAlerts) {
-            HWND hList = GetDlgItem(g_hwndAlerts, IDC_LIST_ALERTS);
-            if (upd.full_refresh) {
-                PopulateAlertsList(hList);
-            }
-            else {
-                for (const auto& a : upd.alerts)
-                    AddAlertToListView(hList, a);
-            }
+        if (upd.full_refresh) {
+            // ── Initial load / reconnect ─────────────────────────────────────
+            // Populate the list with existing data silently. Never notify here
+            // regardless of what alerts are present — they are not new events.
+            g_alerts.clear();
+            for (auto& a : upd.alerts) g_alerts.push_back(a);
+            if (g_hwndAlerts)
+                PopulateAlertsList(GetDlgItem(g_hwndAlerts, IDC_LIST_ALERTS));
+            g_initialLoadDone = true;   // allow notifications from now on
+            break;
         }
 
-        // Notify about new alerts — honour the addressed-to-me filter.
-        // The alerts list window always shows everything; only the notification
-        // (banner / sound / icon) is suppressed for non-matching alerts.
-        if (!upd.alerts.empty()) {
-            // Find the most-recent alert that passes the filter.
+        // ── Incremental update ───────────────────────────────────────────────
+        for (auto& a : upd.alerts) g_alerts.push_back(a);
+        if (g_hwndAlerts) {
+            HWND hList = GetDlgItem(g_hwndAlerts, IDC_LIST_ALERTS);
+            for (const auto& a : upd.alerts)
+                AddAlertToListView(hList, a);
+        }
+
+        // Notify only after the initial load and only for genuinely new alerts.
+        // The alerts list window always shows everything unconditionally above.
+        if (g_initialLoadDone && !upd.alerts.empty()) {
+            // Find the most-recent alert that passes the addressed-to-me filter.
             const Alert* notify = nullptr;
             for (auto it = upd.alerts.rbegin(); it != upd.alerts.rend(); ++it) {
                 if (!g_cfg.addressed_only ||
@@ -1218,10 +1233,78 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
 }
 
 // ---------------------------------------------------------------------------
+// Auto-start (HKCU Run key)
+// ---------------------------------------------------------------------------
+
+static bool InstallAutoRun() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+        0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    LONG rc = RegSetValueExW(hKey, L"GNZNotificationAgent", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(exePath),
+        static_cast<DWORD>((wcslen(exePath) + 1) * sizeof(wchar_t)));
+    RegCloseKey(hKey);
+    return rc == ERROR_SUCCESS;
+}
+
+static bool UninstallAutoRun() {
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+        0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    LONG rc = RegDeleteValueW(hKey, L"GNZNotificationAgent");
+    RegCloseKey(hKey);
+    // ERROR_FILE_NOT_FOUND means it was already absent — treat as success.
+    return rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND;
+}
+
+// ---------------------------------------------------------------------------
 // WinMain
 // ---------------------------------------------------------------------------
 
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    // Handle install / uninstall command-line arguments before any UI is set up.
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv && argc >= 2) {
+            if (_wcsicmp(argv[1], L"install") == 0) {
+                LocalFree(argv);
+                if (InstallAutoRun())
+                    MessageBoxW(nullptr,
+                        L"GNZ Notification Agent has been registered to start automatically on login.",
+                        L"GNZ Agent — Installed", MB_OK | MB_ICONINFORMATION);
+                else
+                    MessageBoxW(nullptr,
+                        L"Failed to register auto-start.\n"
+                        L"Check that the executable path is accessible.",
+                        L"GNZ Agent — Error", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            if (_wcsicmp(argv[1], L"uninstall") == 0) {
+                LocalFree(argv);
+                if (UninstallAutoRun())
+                    MessageBoxW(nullptr,
+                        L"GNZ Notification Agent has been removed from auto-start.",
+                        L"GNZ Agent — Uninstalled", MB_OK | MB_ICONINFORMATION);
+                else
+                    MessageBoxW(nullptr,
+                        L"Failed to remove auto-start registration.",
+                        L"GNZ Agent — Error", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+        }
+        if (argv) LocalFree(argv);
+    }
+
     g_hInst = hInst;
 
     // Enable DPI awareness for clean rendering on high-DPI displays
