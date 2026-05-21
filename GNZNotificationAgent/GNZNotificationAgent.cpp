@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // gnz_notification_agent.cpp
 // GNZ Notification Agent  —  system-tray application
 // =============================================================================
@@ -1383,3 +1383,4 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     return static_cast<int>(msg.wParam);
 }
+
