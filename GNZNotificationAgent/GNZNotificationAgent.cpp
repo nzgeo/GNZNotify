@@ -72,6 +72,10 @@
 
 // Banner close button
 #define IDC_BANNER_CLOSE   400
+// Banner text areas (used for per-section colour handling)
+#define IDC_BANNER_LINE1   401   // header  — green background
+#define IDC_BANNER_LINE2   402   // body    — yellow background
+#define IDC_BANNER_HINT    403   // hint    — yellow background
 
 // Custom window messages
 #define WM_TRAYICON        (WM_USER + 1)   // tray icon callback
@@ -155,6 +159,15 @@ static CRITICAL_SECTION  g_pendingCS;
 static std::wstring g_bannerLine1;   // e.g. "PROJ-123  [High]"
 static std::wstring g_bannerLine2;   // summary text
 static std::wstring g_bannerLink;    // Jira browse URL — opened on click (empty = no link)
+
+// Banner GDI resources (created once in wWinMain, deleted on exit)
+static HFONT  g_bannerFontHeader = nullptr;   // large bold font for the header line
+static HFONT  g_bannerFontBody = nullptr;   // medium font for summary and hint
+static HBRUSH g_brushBannerGreen = nullptr;   // header section background
+static HBRUSH g_brushBannerYellow = nullptr;   // body section background
+
+// Vertical split point (client-area pixels) between green header and yellow body
+static constexpr int BANNER_SPLIT = 44;
 
 // ---------------------------------------------------------------------------
 // String conversion
@@ -595,6 +608,33 @@ static LRESULT CALLBACK BannerWndProc(HWND hwnd, UINT msg,
         SetTimer(hwnd, BANNER_TIMER, BANNER_MS, nullptr);
         break;
 
+    case WM_ERASEBKGND: {
+        // Paint top section green (header) and bottom section yellow (body).
+        RECT r{};
+        GetClientRect(hwnd, &r);
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT header = { r.left, r.top,        r.right, BANNER_SPLIT };
+        RECT body = { r.left, BANNER_SPLIT, r.right, r.bottom };
+        FillRect(hdc, &header, g_brushBannerGreen);
+        FillRect(hdc, &body, g_brushBannerYellow);
+        return 1;   // background handled
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        int id = GetDlgCtrlID(reinterpret_cast<HWND>(lParam));
+        if (id == IDC_BANNER_LINE1) {
+            // Header section — white text on green
+            SetBkColor(hdc, RGB(0, 128, 0));
+            SetTextColor(hdc, RGB(255, 255, 255));
+            return reinterpret_cast<LRESULT>(g_brushBannerGreen);
+        }
+        // Body section (line 2 and hint) — dark text on yellow
+        SetBkColor(hdc, RGB(255, 255, 153));
+        SetTextColor(hdc, RGB(50, 50, 50));
+        return reinterpret_cast<LRESULT>(g_brushBannerYellow);
+    }
+
     case WM_TIMER:
         if (wParam == BANNER_TIMER) DestroyWindow(hwnd);
         break;
@@ -641,15 +681,14 @@ static void ShowBanner(const Alert& a) {
 
     g_bannerLine1 = key;
     if (!pri.empty()) g_bannerLine1 += L"  [" + pri + L"]";
-    g_bannerLine2 = sum.size() > 60
-        ? sum.substr(0, 57) + L"..."
-        : sum;
+    // Allow slightly longer summary — the body section can wrap to two lines
+    g_bannerLine2 = sum.size() > 80 ? sum.substr(0, 77) + L"..." : sum;
     g_bannerLink = Utf8ToWide(a.link);
 
     // Position at bottom-right of work area
     RECT wa{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    const int W = 390, H = 110;
+    const int W = 430, H = 160;
     int x = wa.right - W - 12;
     int y = wa.bottom - H - 12;
 
@@ -666,24 +705,40 @@ static void ShowBanner(const Alert& a) {
 
     if (!g_hwndBanner) return;
 
-    // Line 1 — issue key + priority
-    CreateWindowExW(0, L"STATIC", g_bannerLine1.c_str(),
+    // Line 1 — issue key + priority (green header section)
+    HWND hLine1 = CreateWindowExW(0, L"STATIC", g_bannerLine1.c_str(),
         WS_CHILD | WS_VISIBLE | SS_LEFT,
-        8, 4, W - 20, 24,
-        g_hwndBanner, nullptr, g_hInst, nullptr);
+        10, 8, W - 24, 30,
+        g_hwndBanner,
+        reinterpret_cast<HMENU>(IDC_BANNER_LINE1),
+        g_hInst, nullptr);
+    if (g_bannerFontHeader)
+        SendMessageW(hLine1, WM_SETFONT,
+            reinterpret_cast<WPARAM>(g_bannerFontHeader), TRUE);
 
-    // Line 2 — summary
-    CreateWindowExW(0, L"STATIC", g_bannerLine2.c_str(),
+    // Line 2 — summary (yellow body section; SS_LEFT wraps automatically)
+    HWND hLine2 = CreateWindowExW(0, L"STATIC", g_bannerLine2.c_str(),
         WS_CHILD | WS_VISIBLE | SS_LEFT,
-        8, 30, W - 20, 40,
-        g_hwndBanner, nullptr, g_hInst, nullptr);
+        10, 50, W - 24, 46,
+        g_hwndBanner,
+        reinterpret_cast<HMENU>(IDC_BANNER_LINE2),
+        g_hInst, nullptr);
+    if (g_bannerFontBody)
+        SendMessageW(hLine2, WM_SETFONT,
+            reinterpret_cast<WPARAM>(g_bannerFontBody), TRUE);
 
-    // Line 3 — click hint shown only when a link is available
-    if (!g_bannerLink.empty())
-        CreateWindowExW(0, L"STATIC", L"Click to open in Jira",
+    // Line 3 — click hint shown only when a link is available (yellow body)
+    if (!g_bannerLink.empty()) {
+        HWND hHint = CreateWindowExW(0, L"STATIC", L"Click to open in Jira",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            8, 74, W - 20, 18,
-            g_hwndBanner, nullptr, g_hInst, nullptr);
+            10, 102, W - 24, 22,
+            g_hwndBanner,
+            reinterpret_cast<HMENU>(IDC_BANNER_HINT),
+            g_hInst, nullptr);
+        if (g_bannerFontBody)
+            SendMessageW(hHint, WM_SETFONT,
+                reinterpret_cast<WPARAM>(g_bannerFontBody), TRUE);
+    }
 
     ShowWindow(g_hwndBanner, SW_SHOWNOACTIVATE);
     UpdateWindow(g_hwndBanner);
@@ -1353,7 +1408,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     reg(WC_MAIN, MainWndProc, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
     reg(WC_ALERTS, AlertsWndProc, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
     reg(WC_CONFIG, ConfigWndProc, reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1));
-    reg(WC_BANNER, BannerWndProc, reinterpret_cast<HBRUSH>(COLOR_INFOBK + 1));
+    reg(WC_BANNER, BannerWndProc, nullptr);   // background painted manually in WM_ERASEBKGND
 
     // Create the hidden main window (hosts tray icon and message loop target)
     g_hwndMain = CreateWindowExW(
@@ -1368,6 +1423,23 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     g_pollWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     StartPoll();
 
+    // Banner GDI resources — created once here, deleted after the message loop.
+    // Header font: ~16 pt bold; body font: ~12 pt regular.  Using Segoe UI which
+    // ships with Windows Vista and later; falls back to the system sans-serif.
+    // Negative height = character height in pixels (not cell height).
+    const int fhHeader = -22;
+    const int fhBody = -17;
+    g_bannerFontHeader = CreateFontW(
+        fhHeader, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_bannerFontBody = CreateFontW(
+        fhBody, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_brushBannerGreen = CreateSolidBrush(RGB(0, 128, 0));
+    g_brushBannerYellow = CreateSolidBrush(RGB(255, 255, 153));
+
     // Message loop — IsDialogMessageW enables Tab navigation in modeless windows
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
@@ -1378,9 +1450,12 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     // Cleanup
+    if (g_bannerFontHeader) { DeleteObject(g_bannerFontHeader);  g_bannerFontHeader = nullptr; }
+    if (g_bannerFontBody) { DeleteObject(g_bannerFontBody);    g_bannerFontBody = nullptr; }
+    if (g_brushBannerGreen) { DeleteObject(g_brushBannerGreen);  g_brushBannerGreen = nullptr; }
+    if (g_brushBannerYellow) { DeleteObject(g_brushBannerYellow); g_brushBannerYellow = nullptr; }
     if (g_pollWake) { CloseHandle(g_pollWake); g_pollWake = nullptr; }
     DeleteCriticalSection(&g_pendingCS);
 
     return static_cast<int>(msg.wParam);
 }
-
