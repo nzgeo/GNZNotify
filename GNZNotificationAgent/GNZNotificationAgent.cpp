@@ -140,6 +140,7 @@ static HWND      g_hwndBanner = nullptr;   // current banner    (nullptr if none
 static HICON g_iconNormal = nullptr;        // default tray icon
 static HICON g_iconAlert = nullptr;        // alert-pending tray icon
 static bool  g_hasAlert = false;          // true while unacknowledged alerts exist
+static UINT  g_wmTaskbarCreated = 0;      // RegisterWindowMessage("TaskbarCreated")
 
 static AgentConfig g_cfg;
 static std::vector<Alert> g_alerts;         // local alert cache (main thread only)
@@ -432,6 +433,9 @@ static void SaveConfig() {
 // Tray icon management
 // ---------------------------------------------------------------------------
 
+// Timer used to retry adding the tray icon if the shell isn't ready yet.
+static constexpr UINT_PTR TRAYADD_RETRY_TIMER = 0xA1;
+
 static void AddTrayIcon() {
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
@@ -439,9 +443,22 @@ static void AddTrayIcon() {
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = g_iconNormal;
+    nid.hIcon = g_hasAlert ? g_iconAlert : g_iconNormal;
     wcscpy_s(nid.szTip, L"GNZ Notification Agent");
-    Shell_NotifyIconW(NIM_ADD, &nid);
+
+    if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+        // Opt into modern (Vista+) tray behaviour for more reliable callbacks.
+        nid.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &nid);
+        // Success: cancel any pending retry.
+        KillTimer(g_hwndMain, TRAYADD_RETRY_TIMER);
+    }
+    else {
+        // The shell may not have created the tray yet (common during logon via the
+        // Run key). Schedule a retry; TaskbarCreated normally handles this, but the
+        // timer covers heavily loaded machines where the broadcast is missed/early.
+        SetTimer(g_hwndMain, TRAYADD_RETRY_TIMER, 1000, nullptr);
+    }
 }
 
 static void UpdateTrayIcon(bool alert) {
@@ -1188,9 +1205,21 @@ static void ShowTrayMenu() {
 
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
     WPARAM wParam, LPARAM lParam) {
+    // Explorer broadcasts "TaskbarCreated" when the taskbar/tray is (re)created —
+    // at first logon (which may occur after our process has already started) and
+    // whenever Explorer restarts. Re-adding the icon here guarantees it appears
+    // regardless of startup timing. This is a dynamic message ID, so it cannot be
+    // a case label.
+    if (msg == g_wmTaskbarCreated) {
+        AddTrayIcon();
+        if (g_cfg.icon_chg && g_hasAlert) UpdateTrayIcon(true);
+        return 0;
+    }
+
     switch (msg) {
     case WM_CREATE:
         g_hwndMain = hwnd;
+        g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
         AddTrayIcon();
         break;
 
@@ -1272,7 +1301,16 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg,
         UpdateTrayTip(wParam == 1);
         break;
 
+    case WM_TIMER:
+        if (wParam == TRAYADD_RETRY_TIMER) {
+            // Retry adding the icon; AddTrayIcon() kills the timer on success.
+            AddTrayIcon();
+            return 0;
+        }
+        break;
+
     case WM_DESTROY:
+        KillTimer(hwnd, TRAYADD_RETRY_TIMER);
         StopPoll();
         RemoveTrayIcon();
         if (g_hwndAlerts) { DestroyWindow(g_hwndAlerts); g_hwndAlerts = nullptr; }
